@@ -1,4 +1,4 @@
-const CACHE_NAME = 'fractal-v17-20260904';
+const CACHE_NAME = 'fractal-v19-20260904';
 const APP_SHELL = [
   '/',
   '/index.html',

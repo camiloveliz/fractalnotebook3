@@ -216,6 +216,12 @@
   .news-desc{font-size:12.5px;line-height:1.45;color:var(--ink-soft);margin-top:7px;}
   .news-loading{padding:34px 0;text-align:center;color:var(--ink-soft);font-weight:600;}
   .topbar-news{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;border:none;background:var(--card);font-size:18px;}
+
+.ai-model-status{font-size:11px;color:var(--ink-soft);margin:4px 0 10px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.ai-dot{width:8px;height:8px;border-radius:50%;background:#999;display:inline-block}
+.ai-dot.ready{background:#3d8b40}.ai-dot.loading{background:#c89225}.ai-dot.error{background:#b94a48}
+.ai-progress{height:5px;background:rgba(0,0,0,.08);border-radius:999px;overflow:hidden;flex:1;min-width:90px;max-width:180px}
+.ai-progress>span{display:block;height:100%;background:var(--accent);width:0%;transition:width .2s}
 </style>
 </head>
 <body>
@@ -470,87 +476,236 @@ function shuffledQuestion(question, correct, distractors){
   const rotated=options.slice(shift).concat(options.slice(0,shift));
   return {question,options:rotated,correctIndex:rotated.indexOf(correct),selected:null};
 }
-function quizConceptPairs(text){
-  const pairs=[], seen=new Set();
-  const junk=/errores? de lectura|archivo(?:s)? digitales?|p[aá]gina|diapositiva|evaluaci[oó]n|semana|entrega|informe|bienvenidos/i;
-  for(const raw of sentenceList(cleanStudySource(text)).filter(usefulStudySentence)){
-    const s=raw.replace(/\s+/g,' ').trim();
-    if(junk.test(s)) continue;
-    let m=null;
-    for(const rx of [/^(.{3,55}?)\s+(?:es|son)\s+(.{20,150})$/i,/^(.{3,55}?)\s+(?:consiste en|se define como)\s+(.{20,150})$/i,/^(.{3,55}?)\s+(?:permite|sirve para|se utiliza para)\s+(.{20,150})$/i]){
-      m=s.match(rx); if(m) break;
-    }
-    if(!m) continue;
-    const concept=m[1].replace(/^[•\-–—]\s*/,'').trim(), definition=m[2].replace(/[.;]\s*$/,'').trim();
-    if(concept.length>55||definition.length>150||junk.test(concept)||junk.test(definition)||seen.has(concept.toLowerCase())) continue;
-    seen.add(concept.toLowerCase()); pairs.push({concept:cap(concept),definition});
-  }
-  return pairs.slice(0,35);
+
+function quizCleanText(s){
+  return (s||'').replace(/\s+/g,' ').replace(/^[•\-–—]\s*/,'').trim();
 }
-function shortDefinition(d){
-  let x=(d||'').trim();
-  const parts=x.split(/\s*[,;]\s+|\s+que\s+/i).filter(Boolean);
-  if(parts[0]&&parts[0].length>=25)x=parts[0];
-  if(x.length>105)x=x.slice(0,102).replace(/\s+\S*$/,'')+'…';
-  return x.replace(/[.:\s]+$/,'');
+function quizJunk(s){
+  return /errores? de lectura|archivos? digitales?|p[aá]gina|diapositiva|slide|evaluaci[oó]n|semana|entrega|informe|bienvenid|objetivos? de la clase|fecha|bibliograf[ií]a|referencias?/i.test(s||'');
+}
+function quizNorm(s){
+  return (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^a-z0-9ñü]+/g,' ').replace(/\s+/g,' ').trim();
+}
+function quizShort(s,max=118){
+  let x=quizCleanText(s).replace(/[.;:\s]+$/,'');
+  if(x.length>max) x=x.slice(0,max-1).replace(/\s+\S*$/,'')+'…';
+  return x;
+}
+function quizFacts(text){
+  const facts=[], seen=new Set();
+  const sentences=sentenceList(cleanStudySource(text)).filter(usefulStudySentence);
+  const patterns=[
+    {type:'definition',rx:/^(.{3,60}?)\s+(?:es|son|se define como|se entiende como|consiste en)\s+(.{18,190})$/i},
+    {type:'function',rx:/^(.{3,60}?)\s+(?:permite|permiten|sirve para|sirven para|se utiliza para|se utilizan para|tiene como funci[oó]n)\s+(.{18,190})$/i},
+    {type:'feature',rx:/^(.{3,60}?)\s+(?:se caracteriza por|se caracterizan por|presenta|presentan|posee|poseen)\s+(.{18,190})$/i},
+    {type:'composition',rx:/^(.{3,60}?)\s+(?:se compone de|se componen de|est[aá] formado por|est[aá]n formados por|contiene|contienen)\s+(.{18,190})$/i},
+    {type:'cause',rx:/^(.{3,70}?)\s+(?:provoca|provocan|produce|producen|genera|generan|causa|causan|aumenta|aumentan|disminuye|disminuyen|favorece|favorecen)\s+(.{15,180})$/i}
+  ];
+  for(const raw of sentences){
+    const s=quizCleanText(raw);
+    if(quizJunk(s) || s.length<28 || s.length>260) continue;
+    let match=null, type='';
+    for(const p of patterns){
+      const m=s.match(p.rx);
+      if(m){ match=m; type=p.type; break; }
+    }
+    if(!match) continue;
+    const concept=quizCleanText(match[1]).replace(/^(?:el|la|los|las|un|una)\s+/i,'');
+    const detail=quizCleanText(match[2]);
+    if(concept.length<3 || concept.length>60 || detail.length<15 || quizJunk(concept) || quizJunk(detail)) continue;
+    const key=quizNorm(concept)+'|'+quizNorm(detail);
+    if(seen.has(key)) continue;
+    seen.add(key);
+    facts.push({concept:cap(concept),detail,type,source:s});
+  }
+  return facts.slice(0,60);
+}
+function quizConceptGroups(facts){
+  const map=new Map();
+  for(const f of facts){
+    const k=quizNorm(f.concept);
+    if(!map.has(k)) map.set(k,{concept:f.concept,facts:[]});
+    const g=map.get(k);
+    if(!g.facts.some(x=>quizNorm(x.detail)===quizNorm(f.detail))) g.facts.push(f);
+  }
+  return [...map.values()];
 }
 function quizKey(q){
-  return (q||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'')
-    .replace(/[¿?¡!.,:;()[\]'"_-]/g,' ').replace(/\s+/g,' ').trim();
+  return quizNorm(q||'');
+}
+function quizOptionSet(options){
+  const seen=new Set();
+  for(const o of options){
+    const k=quizNorm(o);
+    if(!k || seen.has(k)) return false;
+    seen.add(k);
+  }
+  return seen.size===4;
+}
+function stableHash(s){
+  let h=2166136261;
+  for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); }
+  return h>>>0;
+}
+function shuffledQuestion(question, correct, distractors){
+  const options=[correct,...distractors].map(x=>quizShort(x,150));
+  if(!quizOptionSet(options)) return null;
+  let seed=stableHash(question+'|'+correct);
+  const arr=options.map((v,i)=>({v,i}));
+  for(let i=arr.length-1;i>0;i--){
+    seed=(Math.imul(seed,1664525)+1013904223)>>>0;
+    const j=seed%(i+1);
+    [arr[i],arr[j]]=[arr[j],arr[i]];
+  }
+  const shuffled=arr.map(x=>x.v);
+  const correctShown=quizShort(correct,150);
+  return {question,options:shuffled,correctIndex:shuffled.indexOf(correctShown),selected:null};
 }
 function pushUniqueQuiz(qs,seen,q){
-  const key=quizKey(q.q||q.question||'');
-  if(!key||seen.has(key))return false;
-  seen.add(key); qs.push(q); return true;
+  if(!q) return false;
+  const key=quizKey(q.question);
+  if(!key || seen.has(key)) return false;
+  seen.add(key);
+  qs.push(q);
+  return true;
+}
+function pickDifferentFacts(facts, current, count=3, sameType=true){
+  let pool=facts.filter(x=>quizNorm(x.concept)!==quizNorm(current.concept) && quizNorm(x.detail)!==quizNorm(current.detail));
+  if(sameType){
+    const typed=pool.filter(x=>x.type===current.type);
+    if(typed.length>=count) pool=typed;
+  }
+  // Prioriza opciones de longitud parecida para que la respuesta correcta no "salte a la vista".
+  return pool.sort((a,b)=>Math.abs(a.detail.length-current.detail.length)-Math.abs(b.detail.length-current.detail.length)).slice(0,count);
+}
+function questionStem(kind,concept,detail,idx){
+  const c=concept, d=quizShort(detail,110);
+  const sets={
+    identify:[
+      `Una definición de la materia describe “${d}”. ¿A qué concepto corresponde?`,
+      `¿Qué concepto explica mejor la siguiente descripción: “${d}”?`,
+      `Si tuvieras que asociar “${d}” con un concepto estudiado, ¿cuál elegirías?`
+    ],
+    meaning:[
+      `Respecto de ${c}, ¿cuál de las siguientes afirmaciones es correcta según la materia?`,
+      `¿Qué opción describe con mayor precisión a ${c}?`,
+      `¿Cuál afirmación corresponde específicamente a ${c} y no a otro concepto del tema?`
+    ],
+    application:[
+      `En un ejercicio aparece la situación “${d}”. ¿Qué concepto permite interpretarla correctamente?`,
+      `Durante el estudio se observa “${d}”. ¿Con qué concepto se relaciona de forma más directa?`,
+      `¿Qué concepto sería el más adecuado para explicar “${d}”?`
+    ]
+  };
+  const a=sets[kind]||sets.identify;
+  return a[idx%a.length];
+}
+function buildAssociationQuestion(facts, offset=0, exceptMode=false){
+  if(facts.length<4) return null;
+  const base=facts[offset%facts.length];
+  const other=pickDifferentFacts(facts,base,3,false);
+  if(other.length<3) return null;
+  if(!exceptMode){
+    const correct=`${base.concept} — ${quizShort(base.detail,92)}`;
+    const wrong=other.map((f,i)=>{
+      const next=other[(i+1)%other.length];
+      return `${f.concept} — ${quizShort(next.detail,92)}`;
+    });
+    return shuffledQuestion(
+      '¿Cuál de las siguientes asociaciones concepto–descripción es correcta según el material estudiado?',
+      correct, wrong
+    );
+  }
+  // 3 asociaciones reales + 1 asociación cruzada. La cruzada es la respuesta a EXCEPTO.
+  const trueFacts=[base,...other.slice(0,2)];
+  const trueOpts=trueFacts.map(f=>`${f.concept} — ${quizShort(f.detail,92)}`);
+  const wrongConcept=other[2].concept;
+  const wrongDetail=base.detail;
+  const wrong=`${wrongConcept} — ${quizShort(wrongDetail,92)}`;
+  return shuffledQuestion(
+    'Todas las siguientes asociaciones son correctas según la materia, EXCEPTO:',
+    wrong, trueOpts
+  );
+}
+function buildCauseQuestion(causeFacts, allFacts, idx){
+  const f=causeFacts[idx%causeFacts.length];
+  const wrong=pickDifferentFacts(allFacts,f,3,false).map(x=>quizShort(x.detail,115));
+  if(wrong.length<3) return null;
+  const stems=[
+    `Según la relación causal presentada en la materia, si ocurre ${f.concept}, ¿qué consecuencia se espera?`,
+    `¿Cuál es el efecto que el material asocia directamente con ${f.concept}?`,
+    `Si ${f.concept} estuviera presente en una situación de aplicación, ¿qué resultado sería coherente con lo estudiado?`
+  ];
+  return shuffledQuestion(stems[idx%stems.length],quizShort(f.detail,115),wrong);
 }
 function generateLocalQuiz(cls){
   const text=cleanStudySource(sourceTextForClass(cls));
-  if(text.length<30)return[];
-  const pairs=quizConceptPairs(text);
-  const junk=/errores?|lectura|archivo|p[aá]gina|diapositiva|evaluaci[oó]n|semana|entrega|informe/i;
-  const keywords=topKeywords(sentenceList(text).filter(usefulStudySentence).join(' '),80).map(cap)
-    .filter(x=>x.length>=5&&x.length<=40&&!junk.test(x));
-  const concepts=[...new Set([...pairs.map(p=>p.concept),...keywords])];
-  const qs=[], seenQ=new Set(), usedConcept=new Set();
+  if(text.length<80) return [];
 
-  // 1. Concepto a partir de su significado.
-  for(const p of pairs){
-    const def=shortDefinition(p.definition);
-    const distractors=concepts.filter(c=>c.toLowerCase()!==p.concept.toLowerCase()).slice(0,3);
-    if(def.length>=20&&distractors.length===3){
-      pushUniqueQuiz(qs,seenQ,shuffledQuestion(`¿Qué concepto corresponde a esta descripción: ${def}?`,p.concept,distractors));
-      usedConcept.add(p.concept.toLowerCase());
-    }
-    if(qs.length>=10)break;
+  const facts=quizFacts(text);
+  const groups=quizConceptGroups(facts);
+  if(facts.length<2 || groups.length<2) return [];
+
+  const qs=[], seenQ=new Set();
+  const usableFacts=facts.filter(f=>f.detail.length>=18 && f.detail.length<=190);
+  const strongFacts=usableFacts.filter(f=>pickDifferentFacts(usableFacts,f,3,true).length>=3);
+  const broadFacts=usableFacts.filter(f=>pickDifferentFacts(usableFacts,f,3,false).length>=3);
+
+  // A. Reconocimiento conceptual: máximo 6.
+  for(let i=0;i<broadFacts.length && qs.length<6;i++){
+    const f=broadFacts[i];
+    const distractors=pickDifferentFacts(broadFacts,f,3,false).map(x=>x.concept);
+    const q=shuffledQuestion(questionStem('identify',f.concept,f.detail,i),f.concept,distractors);
+    pushUniqueQuiz(qs,seenQ,q);
   }
 
-  // 2. Significado/función del concepto.
-  for(const p of pairs){
-    if(qs.length>=20)break;
-    const correct=shortDefinition(p.definition);
-    const others=pairs.filter(x=>x.concept.toLowerCase()!==p.concept.toLowerCase())
-      .map(x=>shortDefinition(x.definition)).filter(x=>x.length>=20&&x.toLowerCase()!==correct.toLowerCase()).slice(0,3);
-    if(correct.length>=20&&others.length===3)
-      pushUniqueQuiz(qs,seenQ,shuffledQuestion(`¿Cuál afirmación explica mejor ${p.concept}?`,correct,others));
+  // B. Comprensión precisa: definiciones/funciones similares como distractores. Máximo 6.
+  let target=12;
+  for(let i=0;i<strongFacts.length && qs.length<target;i++){
+    const f=strongFacts[i];
+    const distractors=pickDifferentFacts(strongFacts,f,3,true).map(x=>quizShort(x.detail,120));
+    const q=shuffledQuestion(questionStem('meaning',f.concept,f.detail,i),quizShort(f.detail,120),distractors);
+    pushUniqueQuiz(qs,seenQ,q);
   }
 
-  // 3. Relación entre conceptos. Cada concepto se usa una sola vez.
-  for(const p of pairs){
-    if(qs.length>=30)break;
-    const key=p.concept.toLowerCase();
-    if(usedConcept.has('rel:'+key))continue;
-    const correct=p.concept;
-    const distractors=concepts.filter(c=>c.toLowerCase()!==key).slice(-3);
-    if(distractors.length===3){
-      const def=shortDefinition(p.definition);
-      pushUniqueQuiz(qs,seenQ,shuffledQuestion(`Según la materia, ¿qué concepto se relaciona con “${def}”?`,correct,distractors));
-      usedConcept.add('rel:'+key);
-    }
+  // C. Aplicación contextual: no copia textual del enunciado como pregunta. Máximo 5.
+  target=17;
+  for(let i=0;i<broadFacts.length && qs.length<target;i++){
+    const f=broadFacts[(i*2+1)%broadFacts.length];
+    const distractors=pickDifferentFacts(broadFacts,f,3,false).map(x=>x.concept);
+    const q=shuffledQuestion(questionStem('application',f.concept,f.detail,i),f.concept,distractors);
+    pushUniqueQuiz(qs,seenQ,q);
   }
 
-  // Si no hay 30 ideas buenas, entrega menos preguntas antes que rellenar con preguntas repetidas/genéricas.
+  // D. Asociación cruzada y preguntas EXCEPTO: más capciosas, pero siempre basadas en el material.
+  target=23;
+  for(let i=0;i<usableFacts.length && qs.length<target;i++){
+    pushUniqueQuiz(qs,seenQ,buildAssociationQuestion(usableFacts,i,false));
+    if(qs.length<target) pushUniqueQuiz(qs,seenQ,buildAssociationQuestion(usableFacts,i+2,true));
+  }
+
+  // E. Causa → efecto cuando el material contiene relaciones causales explícitas.
+  const causes=usableFacts.filter(f=>f.type==='cause');
+  target=27;
+  for(let i=0;i<causes.length && qs.length<target;i++){
+    pushUniqueQuiz(qs,seenQ,buildCauseQuestion(causes,usableFacts,i));
+  }
+
+  // F. Completa hasta 30 SOLO con preguntas de buena calidad; nunca rellena con genéricas.
+  for(let i=6;i<broadFacts.length && qs.length<30;i++){
+    const f=broadFacts[i];
+    const distractors=pickDifferentFacts(broadFacts,f,3,false).map(x=>x.concept);
+    pushUniqueQuiz(qs,seenQ,shuffledQuestion(
+      `¿Cuál de estos conceptos NO debería confundirse con los demás si la descripción clave es “${quizShort(f.detail,105)}”?`,
+      f.concept,distractors
+    ));
+  }
+
+  // Si hay poca materia, entrega menos preguntas. Nunca supera 30.
   return qs.slice(0,30);
 }
+
 /* ---------- Audio: guardado local (IndexedDB) ---------- */
 const AUDIO_DB_NAME = 'fractal_notebook_audio';
 function openAudioDB(){
@@ -1101,11 +1256,11 @@ function clearClassTranscript(subId,classId){
 /* ---------- Cuestionario de estudio con IA ---------- */
 async function generateQuiz(sub,cls){
   const btn = document.getElementById('genQuizBtn');
-  if(btn){ btn.disabled=true; btn.textContent='Generando cuestionario…'; }
+  if(btn){ btn.disabled=true; btn.textContent='Creando preguntas de estudio…'; }
   try{
     const quiz=generateLocalQuiz(cls);
     if(!quiz.length){
-      alert('Todavía no hay suficiente contenido. Agrega apuntes, una transcripción o un archivo con texto y vuelve a intentarlo.');
+      alert('Todavía no hay suficiente materia clara para crear un buen cuestionario. Agrega apuntes, transcripción o archivos con contenido y vuelve a intentarlo.');
       return;
     }
     cls.quiz=quiz;
@@ -1636,6 +1791,127 @@ function mdToHtml(md){
   return html;
 }
 
+
+/* ---------- Motor IA generativo local ---------- */
+const FRACTAL_LLM_MODEL='Qwen2.5-0.5B-Instruct-q4f16_1-MLC';
+let fractalLLMEngine=null;
+let fractalLLMLoading=null;
+let fractalLLMState={status:'idle',progress:0,text:'IA local no cargada'};
+
+function setLLMState(status,progress,text){
+  fractalLLMState={status,progress:Math.max(0,Math.min(100,progress||0)),text:text||''};
+  const el=document.getElementById('aiModelStatus');
+  if(el){
+    const dot=el.querySelector('.ai-dot'), txt=el.querySelector('.ai-status-text'), bar=el.querySelector('.ai-progress span');
+    if(dot) dot.className='ai-dot '+(status==='ready'?'ready':status==='loading'?'loading':status==='error'?'error':'');
+    if(txt) txt.textContent=fractalLLMState.text;
+    if(bar) bar.style.width=fractalLLMState.progress+'%';
+  }
+}
+function supportsLocalLLM(){
+  return !!navigator.gpu;
+}
+async function ensureFractalLLM(){
+  if(fractalLLMEngine) return fractalLLMEngine;
+  if(fractalLLMLoading) return fractalLLMLoading;
+  if(!supportsLocalLLM()) throw new Error('WEBGPU_UNAVAILABLE');
+  fractalLLMLoading=(async()=>{
+    try{
+      setLLMState('loading',2,'Preparando IA local…');
+      const webllm=await import('https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm/+esm');
+      const engine=await webllm.CreateMLCEngine(FRACTAL_LLM_MODEL,{
+        initProgressCallback:(r)=>{
+          const raw=Number(r.progress||0);
+          const pct=raw<=1?Math.round(raw*100):Math.round(raw);
+          setLLMState('loading',pct, pct<100?`Descargando modelo IA… ${pct}%`:'Iniciando modelo…');
+        }
+      });
+      fractalLLMEngine=engine;
+      setLLMState('ready',100,'Qwen 2.5 local listo · sin API');
+      return engine;
+    }catch(e){
+      console.error('No se pudo iniciar WebLLM:',e);
+      setLLMState('error',0,'IA generativa no disponible · usando modo local básico');
+      throw e;
+    }finally{
+      fractalLLMLoading=null;
+    }
+  })();
+  return fractalLLMLoading;
+}
+function classKnowledgeChunks(cls){
+  const chunks=[];
+  const add=(label,text)=>{
+    const clean=repairLetterSpacedText(stripHtml(text||'')).replace(/\s+/g,' ').trim();
+    if(!clean) return;
+    const parts=clean.match(/.{1,650}(?:[.!?]\s|$)/g)||[clean];
+    parts.forEach((x,i)=>chunks.push({label:parts.length>1?`${label} · parte ${i+1}`:label,text:x.trim()}));
+  };
+  add('Transcripción',(cls.transcript||[]).map(x=>x.text).join(' '));
+  add('Apuntes del estudiante',cls.studentNotes||'');
+  add('Apunte generado',cls.aiNotes||'');
+  for(const f of cls.files||[]) add(`Archivo ${f.name}`,f.text||'');
+  return chunks.slice(0,120);
+}
+function relevantClassContext(cls,question,maxChars=6500){
+  const chunks=classKnowledgeChunks(cls);
+  if(!chunks.length) return {text:'',sources:[]};
+  const ranked=chunks.map(c=>({...c,score:scoreChunkForQuestion(c,question)})).sort((a,b)=>b.score-a.score);
+  let picked=ranked.filter(x=>x.score>0).slice(0,7);
+  if(!picked.length && /clase|materia|tema|resum|explica|estudiar|traduc|english|ingl[eé]s/i.test(question)) picked=ranked.slice(0,6);
+  let text='',sources=[];
+  for(const x of picked){
+    if((text+x.text).length>maxChars) break;
+    text+=`\n[${x.label}]\n${x.text}\n`;
+    sources.push(x.label);
+  }
+  return {text:text.trim(),sources:[...new Set(sources)]};
+}
+function isEnglishSubject(sub){
+  return /(^|\b)(ingl[eé]s|english)(\b|$)/i.test(sub?.name||'');
+}
+function chatHistoryForClass(sub,cls){
+  const key=`${sub.id}:${cls.id}`;
+  return state.chatBySubject[key]||(state.chatBySubject[key]=[]);
+}
+function llmSystemPrompt(sub,cls,hasContext){
+  const english=isEnglishSubject(sub);
+  return `Eres Fractal IA, un tutor de estudio preciso, claro y útil.
+Reglas:
+1. Responde la pregunta real del estudiante; no repitas información irrelevante.
+2. Si se entrega MATERIAL DE LA CLASE, úsalo como fuente prioritaria y conserva su terminología.
+3. Si la respuesta no está en el material y la pregunta es general, puedes responder usando tu conocimiento general. Distingue brevemente cuando sea información externa a la clase.
+4. No inventes datos que supuestamente aparecen en el material.
+5. Explica a nivel de estudiante, con ejemplos cuando ayuden. Sé breve salvo que pidan detalle.
+6. Puedes traducir entre español e inglés, corregir gramática, explicar vocabulario, crear ejercicios, ejemplos y diálogos.
+7. ${english?'Esta es una asignatura de INGLÉS: actúa como profesor de inglés. Por defecto explica en español, incluye el inglés correcto y traducción cuando sea útil. Corrige errores con tacto y explica el porqué.':'Responde normalmente en español, salvo que el estudiante pida otro idioma.'}
+8. No necesitas limitarte al tema de la clase: el estudiante puede preguntarte cualquier cosa de estudio o conocimiento general.
+Asignatura: ${sub?.name||''}
+Clase: ${cls?.name||''}
+${hasContext?'Hay material relevante adjunto en el mensaje del usuario.':'No se encontró material relevante de esta clase para esta pregunta.'}`;
+}
+async function answerWithGenerativeAI(sub,cls,question){
+  const engine=await ensureFractalLLM();
+  const ctx=relevantClassContext(cls,question);
+  const history=chatHistoryForClass(sub,cls).slice(-6).map(m=>({role:m.role==='assistant'?'assistant':'user',content:m.text}));
+  const userContent=(ctx.text?`MATERIAL DE LA CLASE:\n${ctx.text}\n\n`:'')+`PREGUNTA DEL ESTUDIANTE:\n${question}`;
+  const messages=[
+    {role:'system',content:llmSystemPrompt(sub,cls,!!ctx.text)},
+    ...history.slice(0,-1),
+    {role:'user',content:userContent}
+  ];
+  const res=await engine.chat.completions.create({
+    messages,
+    temperature:0.35,
+    top_p:0.9,
+    max_tokens:520,
+    repetition_penalty:1.08
+  });
+  const text=(res?.choices?.[0]?.message?.content||'').trim();
+  if(!text) throw new Error('EMPTY_LLM_RESPONSE');
+  return {text,sources:ctx.sources};
+}
+
 /* ---------- Chat IA ---------- */
 async function buildSubjectContext(sub){
   let ctx = '';
@@ -1710,26 +1986,40 @@ function answerSubjectQuestion(sub,question){
   return {text:response||'No pude construir una respuesta útil con el material disponible.',sources:[...new Set(picked.map(x=>x.label))].slice(0,5)};
 }
 async function sendChat(sub){
-  const input = document.getElementById('chatInput');
-  const text = input.value.trim();
-  if(!text) return;
+  const cls=getClass(sub,state.view.classId);
+  const input=document.getElementById('chatInput');
+  const text=(input?.value||'').trim();
+  if(!text || !cls) return;
   input.value='';
-  state.chatBySubject[sub.id] = state.chatBySubject[sub.id]||[];
-  state.chatBySubject[sub.id].push({role:'user', text});
-  render();
+  const msgs=chatHistoryForClass(sub,cls);
+  msgs.push({role:'user',text});
+  msgs.push({role:'assistant',text:'…',pending:true});
+  persist(true); render();
+
   try{
-    // IA local: busca y sintetiza únicamente el material de la asignatura.
-    const result=answerSubjectQuestion(sub,text);
-    const sourceLine=result.sources.length?'\nFuentes: '+result.sources.join(' · '):'';
-    state.chatBySubject[sub.id].push({role:'assistant', text:result.text+sourceLine});
+    let result;
+    try{
+      result=await answerWithGenerativeAI(sub,cls,text);
+    }catch(e){
+      console.warn('IA generativa no disponible; usando recuperación local:',e);
+      // Respaldo sin descarga/API: responde solo con el material de la asignatura.
+      result=answerSubjectQuestion(sub,text);
+      if(!result.sources.length && !classKnowledgeChunks(cls).length){
+        result={text:'La IA generativa local no está disponible en este dispositivo y no encontré material de clase para responder. Prueba desde Chrome/Android con WebGPU o vuelve a intentar cuando el modelo termine de cargar.',sources:[]};
+      }
+    }
+    const sourceLine=result.sources?.length?'\nFuentes de clase: '+result.sources.join(' · '):'';
+    const current=chatHistoryForClass(sub,cls);
+    let i=-1; for(let j=current.length-1;j>=0;j--){ if(current[j].pending){ i=j; break; } }
+    if(i>=0) current[i]={role:'assistant',text:result.text+sourceLine};
+    else current.push({role:'assistant',text:result.text+sourceLine});
     persist(true);
   }catch(e){
-    console.error('Error en el asistente local:', e);
-    state.chatBySubject[sub.id].push({role:'assistant', text:'⚠ No pude procesar la consulta. Revisa que la asignatura tenga archivos, apuntes o transcripciones con texto.'});
+    console.error('Error Chat IA:',e);
+    const current=chatHistoryForClass(sub,cls);
+    for(let i=current.length-1;i>=0;i--) if(current[i].pending){current[i]={role:'assistant',text:'⚠ No pude responder ahora. Inténtalo nuevamente.'};break;}
     persist(true);
-  }finally{
-    render();
-  }
+  }finally{ render(); }
 }
 
 /* ---------- Render ---------- */
@@ -1931,29 +2221,43 @@ function renderSubject(){
 function setSection(s){ state.view.section=s; render(); }
 
 function askQuick(subId,text){ const input=document.getElementById('chatInput'); if(!input)return; input.value=text; sendChat(getSubject(subId)); }
-function clearSubjectChat(subId){ if(!confirm('¿Borrar toda la conversación de esta asignatura?')) return; state.chatBySubject[subId]=[]; persist(true); render(); }
-function renderChatPanel(sub){
-  const msgs = state.chatBySubject[sub.id]||[];
+function clearSubjectChat(subId){
+  const sub=getSubject(subId), cls=getClass(sub,state.view.classId);
+  if(!cls || !confirm('¿Borrar la conversación de esta clase?')) return;
+  state.chatBySubject[`${sub.id}:${cls.id}`]=[];
+  persist(true); render();
+}
+function renderChatPanel(sub,cls){
+  const msgs=chatHistoryForClass(sub,cls);
+  const english=isEnglishSubject(sub);
+  const st=fractalLLMState;
   let html = `<div class="panel" id="classChatPanel">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-      <h3 style="margin:0;">💬 Chat IA</h3>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+      <h3 style="margin:0;">💬 Fractal IA</h3>
       <button class="btn btn-ghost" style="padding:7px 10px;min-height:36px;font-size:12px;" onclick="clearSubjectChat('${sub.id}')">🗑 Limpiar</button>
     </div>
+    <div class="ai-model-status" id="aiModelStatus">
+      <span class="ai-dot ${st.status==='ready'?'ready':st.status==='loading'?'loading':st.status==='error'?'error':''}"></span>
+      <span class="ai-status-text">${escapeHtml(st.text)}</span>
+      <span class="ai-progress"><span style="width:${st.progress}%"></span></span>
+    </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
-      <button class="btn btn-ghost" onclick="askQuick('${sub.id}','Resume esta clase')">Resumen</button>
-      <button class="btn btn-ghost" onclick="askQuick('${sub.id}','¿Cuáles son los conceptos más importantes de esta clase?')">Conceptos</button>
-      <button class="btn btn-ghost" onclick="askQuick('${sub.id}','Crea preguntas para estudiar esta clase')">Preguntas</button>
+      <button class="btn btn-ghost" onclick="askQuick('${sub.id}','Explícame lo más importante de esta clase para estudiar')">Explicar clase</button>
+      <button class="btn btn-ghost" onclick="askQuick('${sub.id}','Hazme preguntas para practicar esta materia y luego corrige mis respuestas')">Practicar</button>
+      ${english?`<button class="btn btn-ghost" onclick="askQuick('${sub.id}','Ayúdame con inglés: explica la materia de esta clase en español e inglés con ejemplos')">🇬🇧 Tutor inglés</button>
+      <button class="btn btn-ghost" onclick="askQuick('${sub.id}','Quiero traducir un texto. Pregúntame qué texto debo traducir y hacia qué idioma')">Traducir</button>`:''}
     </div>
     <div class="chat-thread" id="chatThread">`;
   msgs.forEach(m=>{
-    const parts = m.role==='assistant' ? m.text.split(/\n(?=Fuentes:)/) : [m.text];
-    html += `<div class="msg ${m.role==='user'?'user':'ai'}">${escapeHtml(parts[0])}${parts[1]?`<div class="src">${escapeHtml(parts[1])}</div>`:''}</div>`;
+    const parts=m.role==='assistant'?m.text.split(/\n(?=Fuentes(?: de clase)?:)/):[m.text];
+    html+=`<div class="msg ${m.role==='user'?'user':'ai'}">${m.pending?'Pensando…':escapeHtml(parts[0])}${parts[1]?`<div class="src">${escapeHtml(parts[1])}</div>`:''}</div>`;
   });
-  html += `</div>
+  html+=`</div>
     <div class="chat-input-row">
-      <input id="chatInput" placeholder="Pregunta sobre la clase…" onkeydown="if(event.key==='Enter')sendChat(getSubject('${sub.id}'))"/>
+      <input id="chatInput" placeholder="${english?'Pregunta, traduce o practica inglés…':'Pregúntame sobre la clase o cualquier tema…'}" onkeydown="if(event.key==='Enter')sendChat(getSubject('${sub.id}'))"/>
       <button class="btn btn-accent" onclick="sendChat(getSubject('${sub.id}'))">➤</button>
     </div>
+    <div style="font-size:10.5px;color:var(--ink-soft);margin-top:7px;">La primera vez puede descargar ~1 GB del modelo Qwen 2.5. Después queda almacenado en el dispositivo. No usa API key.</div>
   </div>`;
   return html;
 }
@@ -2073,7 +2377,7 @@ function renderClassView(){
   // Cuestionario de estudio
   html += `<div class="panel">
     <h3>🧠 Quiz de la materia</h3>
-    <button class="btn btn-accent" id="genQuizBtn" style="width:100%;" onclick="generateQuiz(getSubject('${sub.id}'),getClass(getSubject('${sub.id}'),'${cls.id}'))">🧠 Generar quiz</button>
+    <button class="btn btn-accent" id="genQuizBtn" style="width:100%;" onclick="generateQuiz(getSubject('${sub.id}'),getClass(getSubject('${sub.id}'),'${cls.id}'))">🧠 Generar cuestionario</button><div style="font-size:11px;color:var(--ink-soft);margin-top:7px;text-align:center;">Hasta 30 preguntas variadas; si hay poca materia, genera menos.</div>
     <div style="margin-top:12px;">`;
   if(cls.quiz && cls.quiz.length){
     const answered = cls.quiz.filter(q=>q.selected!==null).length;
@@ -2111,7 +2415,7 @@ function renderClassView(){
     </div>
   </div>`;
 
-  html += renderChatPanel(sub);
+  html += renderChatPanel(sub,cls);
   html += '</div>';
   return html;
 }
